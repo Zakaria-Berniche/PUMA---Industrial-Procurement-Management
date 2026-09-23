@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+.env
+.env.*
+.env.*.local
+.DS_Store
+.git/
+.github/
+.vscode/
+documentation/
+README.md
+docker-compose.yml

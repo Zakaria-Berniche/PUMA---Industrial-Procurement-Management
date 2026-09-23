@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  puma-server:
+    container_name: puma_server
+    build: .
+    ports:
+      - '8080:3001' # Accessible sur le port 8080 de la machine
+    volumes:
+      # Montage du dossier contenant la base de données (évite la création d'un dossier à la place du fichier SQLite)
+      - ./database:/app/database
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DB_PATH=/app/database/puma_database.sqlite
+      - JWT_SECRET=${JWT_SECRET:-puma_prod_jwt_secret_key_change_me_2026}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+
+volumes: {}
