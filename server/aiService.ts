@@ -29,7 +29,7 @@ export const runProcurementCampaign = async (campaign, db, broadcast) => {
     }
 
     // Substitution des variables dans le template
-    let prompt = config.sourcingPromptTemplate
+    const prompt = config.sourcingPromptTemplate
       .replace('{{category}}', campaign.customType || campaign.category)
       .replace('{{brand}}', campaign.brand || 'Toutes marques')
       .replace('{{specs}}', campaign.specs)

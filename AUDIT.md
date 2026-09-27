@@ -19,7 +19,7 @@
 | Fonctionnel cœur (création de tâche) | ❌ `500` sur la base livrée |
 | Persistance des paramètres | ❌ `404` sur `PUT /api/settings/*` |
 | Sécurité | ❌ 6 anomalies confirmées en direct |
-| Git / Livraison | ❌ Aucun commit, binaires SQLite suivis |
+| Git / Livraison | ⚠️ Historique initialisé en cours d'audit (2 commits) mais **binaires SQLite suivis** et aucun `LICENSE` |
 
 ### Preuves d'exécution (résultats bruts)
 
@@ -32,7 +32,9 @@ $ npx vitest run                                          → Test Files 2 faile
                                                             Tests 2 failed | 34 passed (36)
                                                             Duration 6.23s
 $ npm run build                                           → built in 13.92s (45 assets)
-$ git rev-list --count HEAD                               → fatal: ambiguous argument 'HEAD' (0 commit)
+$ git rev-list --count HEAD                               → 0 commit au début de l'audit
+                                                            → 2 commits « Initial commit » (16:16 et 16:39) créés en cours d'audit
+$ git ls-files | Select-String sqlite                     → puma_database.sqlite-shm + puma_database.sqlite-wal suivis
 ```
 
 ```text
@@ -173,12 +175,13 @@ POST /api/tasks (token Collaborateur)        → 201                            
 - `shadcn` (CLI), `jsdom`, `supertest`, `@types/*`, `@vitejs/plugin-react` placés en `dependencies` alors que ce sont des outils de développement.
 - Script `clean` en `rm -rf` (non portable Windows) ; aucune CI (`.github/workflows` absent) ni script de migration versionné.
 
-### P2-4 — Dépôt Git non initialisé
+### P2-4 — Dépôt Git : historique créé en cours d'audit, binaires SQLite committés
 
-- `git rev-list --count HEAD` → `fatal: ambiguous argument 'HEAD'` : **aucun commit**, tous les fichiers sont en index (`A`).
-- **2 binaires SQLite stagés** : `puma_database.sqlite-shm`, `puma_database.sqlite-wal` (`.gitignore:11-12` couvre `*.sqlite` mais pas `-wal`/`-shm`).
-- Aucun fichier `LICENSE` malgré l'en-tête SPDX Apache-2.0 (`src/App.tsx:1-4`). Point positif : `.env.local` est bien ignoré.
-- **Correctif :** premier commit, retirer les sidecars, `.gitignore` → `*.sqlite*`, tag de version, licence.
+- **État au début de l'audit :** `git rev-list --count HEAD` → `fatal: ambiguous argument 'HEAD'` : **aucun commit**, 130+ fichiers en index (`A`).
+- **État en fin d'audit :** 2 commits `Initial commit` (23/09/2026 16:16 et 16:39), 113 fichiers suivis, working tree propre. Le rapport lui-même a été intégré par le second commit.
+- **Problème persistant :** les **binaires SQLite `puma_database.sqlite-shm` et `puma_database.sqlite-wal` sont désormais suivis/committés** (`.gitignore:11-12` couvre `*.sqlite` mais **pas** `-wal`/`-shm`). Or le fichier principal `puma_database.sqlite` est ignoré : les sidecars versionnés sont donc **dépourvus de sens hors du poste de travail** et polluent l'historique (~660 Ko binaires, non différables).
+- Aucun fichier `LICENSE` malgré l'en-tête SPDX Apache-2.0 (`src/App.tsx:1-4`) ; aucun tag de version. Point positif : `.env.local` est bien ignoré.
+- **Correctif :** `git rm --cached puma_database.sqlite-shm puma_database.sqlite-wal` + purge de l'historique (`git filter-repo`/BFG) puis `.gitignore` → `*.sqlite*` (couvre `.sqlite`, `-wal`, `-shm`) ; ajouter `LICENSE`, un `.gitattributes` (`* text=auto`, `*.png binary`) et un tag `v0.1.0`.
 
 ---
 
@@ -206,7 +209,7 @@ POST /api/tasks (token Collaborateur)        → 201                            
 - `Dockerfile:25` copie **tout `node_modules`** (devDependencies incluses) dans l'image runtime → image inutilement volumineuse.
 - `Dockerfile:34` exécute la production via `npx tsx server/index.ts` (transpilation à chaud, dépendance de développement requise en production).
 - **`nginx.conf` est un fichier mort** : `docker-compose.yml` ne déclare aucun service `nginx` (Express sert les statiques) ; `gzip_types` n'inclut pas `application/javascript`.
-- `docker-compose.yml:17` embarqule un `JWT_SECRET` par défaut en clair.
+- `docker-compose.yml:17` embarque un `JWT_SECRET` par défaut en clair.
 
 ### Architecture backend
 
@@ -271,7 +274,7 @@ POST /api/tasks (token Collaborateur)        → 201                            
 | 15 | Base de test isolée (`DB_PATH` temporaire) + mock de `aiService` | `vite.config.ts:26-50`, `server/tests/*` |
 | 16 | Réparer ESLint (parser TS effectif, périmètre `src` + `server`) et l'exécuter en CI | `eslint.config.js` |
 | 17 | Resynchroniser `package-lock.json`, déplacer les devDependencies, `npm ci` en Docker | `package.json`, `package-lock.json`, `Dockerfile` |
-| 18 | Première livraison Git : commit initial, retrait des binaires SQLite, `*.sqlite*` dans `.gitignore`, tag | `.gitignore`, dépôt Git |
+| 18 | Retirer les binaires SQLite de l'index **et de l'historique**, `*.sqlite*` dans `.gitignore`, ajouter `LICENSE` + tag `v0.1.0` | `.gitignore`, dépôt Git |
 | 19 | Pipeline CI : `install → lint → tsc → test → build` | `.github/workflows/ci.yml` (à créer) |
 | 20 | Tests manquants : CRUD complet, slices Zustand, RBAC par ressource, PDF | `server/tests/`, `src/**/*.test.ts` |
 
@@ -304,7 +307,7 @@ POST /api/tasks (token Collaborateur)        → 201                            
 | P2-1 | 🟡 Modéré | 2 tests en échec, base de test non isolée, appels IA pendant les tests | Confirmé par exécution |
 | P2-2 | 🟡 Modéré | ESLint inopérant | Confirmé par `--print-config` |
 | P2-3 | 🟡 Modéré | Lockfile désynchronisé, dépendances mal classées, pas de CI | Confirmé par comparaison |
-| P2-4 | 🟡 Modéré | Git sans commit, binaires SQLite suivis | Confirmé |
+| P2-4 | 🟡 Modéré | Git : historique créé en cours d'audit, mais binaires SQLite (`-wal`/`-shm`) committés | Confirmé |
 | P2-5 | 🟡 Modéré | Documentation obsolète/inexacte | Analyse documentaire |
 | P3-1…n | 🔵 Mineur | Monolithe, fichiers volumineux, mutations silencieuses, poids du bundle | Analyse de code |
 

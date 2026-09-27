@@ -54,7 +54,7 @@ const broadcastEvent = (event: string, data: any, targetUserId?: string) => {
     if (!targetUserId || client.userId === targetUserId) {
       try {
         client.res.write(`data: ${payload}\n\n`);
-      } catch (_) {
+      } catch {
         sseClients.delete(client);
       }
     }
@@ -67,7 +67,7 @@ if (process.env.NODE_ENV !== 'test') {
     for (const client of sseClients) {
       try {
         client.res.write(': ping\n\n');
-      } catch (_) {
+      } catch {
         sseClients.delete(client);
       }
     }
@@ -81,26 +81,6 @@ if (!process.env.JWT_SECRET) {
 const JWT_SECRET: string = process.env.JWT_SECRET;
 
 // Migration/Initialisation automatique du hachage des mots de passe pour les utilisateurs existants
-const ensureUserPasswordHashes = () => {
-  try {
-    const users = db.prepare(`SELECT id, data FROM users`).all() as { id: string; data: string }[];
-    const defaultHash = bcrypt.hashSync('password123', 10);
-    const updateStmt = db.prepare(`UPDATE users SET data = ? WHERE id = ?`);
-
-    for (const u of users) {
-      const userData = JSON.parse(u.data);
-      if (!userData.password_hash) {
-        userData.password_hash = defaultHash;
-        updateStmt.run(JSON.stringify(userData), u.id);
-      }
-    }
-  } catch (err) {
-    console.error("Erreur lors de l'initialisation des hachages de mots de passe :", err);
-  }
-};
-
-ensureUserPasswordHashes();
-
 // --- RATE LIMITING ---
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -142,24 +122,23 @@ app.post('/api/login', loginLimiter, async (req: Request, res: Response) => {
     // Check if user exists
     const users = db.prepare(`SELECT * FROM users`).all() as any[];
     const userRow = users.find(u => {
-      const data = JSON.parse(u.data);
-      return data.email === email;
+      let data: any = {};
+      try { data = JSON.parse(u.data); } catch { /* ignore */ }
+      return u.email === email || data.email === email;
     });
 
     if (userRow) {
-      const user = JSON.parse(userRow.data);
-      const passwordHash = user.password_hash || userRow.password_hash;
+      let user: any = {};
+      try { user = JSON.parse(userRow.data); } catch { /* ignore */ }
+      const passwordHash = userRow.password_hash || user.password_hash;
       if (!passwordHash) {
         return res.status(401).json({ error: 'Compte non configuré ou mot de passe absent' });
       }
       const isMatch = await bcrypt.compare(password, passwordHash);
 
       if (isMatch) {
-        const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
-        // Ne jamais exposer password_hash au client
-        const cleanUser = { ...user };
-        delete cleanUser.password_hash;
-        delete cleanUser.passwordHash;
+        const token = jwt.sign({ id: userRow.id, email: userRow.email || user.email, role: userRow.role || user.role }, JWT_SECRET, { expiresIn: '24h' });
+        const cleanUser = formatRowResponse('users', userRow);
         res.json({ token, user: cleanUser });
         return;
       }
@@ -170,7 +149,6 @@ app.post('/api/login', loginLimiter, async (req: Request, res: Response) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 
 // Authentication Middleware
 const authMiddleware = (req: any, res: Response, next: NextFunction) => {
@@ -185,7 +163,7 @@ const authMiddleware = (req: any, res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       token = authHeader.split(' ')[1];
-    } else if (req.query.token) {
+    } else if (req.path === '/api/stream' && req.query.token) {
       token = req.query.token as string;
     }
     
@@ -207,14 +185,13 @@ const authMiddleware = (req: any, res: Response, next: NextFunction) => {
 
 app.use(authMiddleware);
 
-// A3 — Route /api/me : Valide le token et retourne l'utilisateur courant
-// Utilisée par le frontend au démarrage pour revalider la session
+// Route /api/me : Valide le token et retourne l'utilisateur courant sans secrets
 app.get('/api/me', (req: any, res: Response) => {
   try {
-    const userRow = db.prepare(`SELECT data FROM users WHERE id = ?`).get(req.user?.id);
+    const userRow = db.prepare(`SELECT * FROM users WHERE id = ?`).get(req.user?.id);
     if (!userRow) return res.status(404).json({ error: 'Utilisateur introuvable' });
-    res.json(JSON.parse(userRow.data));
-  } catch (err) {
+    res.json(formatRowResponse('users', userRow, req.user));
+  } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -311,17 +288,26 @@ const getSqlColumnValue = (col: string, data: any) => {
   return '';
 };
 
-const formatRowResponse = (tableName: string, row: any) => {
+const formatRowResponse = (tableName: string, row: any, reqUser?: any) => {
   if (!row) return null;
   let parsed: any = {};
   if (row.data) {
-    try { parsed = JSON.parse(row.data); } catch (_) {}
+    try { parsed = JSON.parse(row.data); } catch { /* ignore */ }
   }
 
   if (tableName === 'users') {
     const cleanUser = { ...parsed };
     delete cleanUser.password_hash;
     delete cleanUser.passwordHash;
+    
+    if (cleanUser.smtpSettings) {
+      const isSelf = reqUser && reqUser.id === row.id;
+      const isAdmin = reqUser && reqUser.role === 'Admin';
+      if (!isSelf && !isAdmin) {
+        delete cleanUser.smtpSettings.pass;
+      }
+    }
+
     return {
       ...cleanUser,
       id: row.id,
@@ -370,12 +356,23 @@ const formatRowResponse = (tableName: string, row: any) => {
 
 // Generic CRUD factory
 const setupCrudRoutes = (tableName: string, extraCols: string[] = [], writeRoles?: string[]) => {
-  const writeMiddlewares = writeRoles ? [requireRole(...writeRoles)] : [];
-
   // GET all (with optional pagination: ?page=1&limit=50)
   app.get(`/api/${tableName}`, (req: Request, res: Response) => {
     try {
+      const currentUser = (req as any).user;
       const { page, limit } = req.query;
+      
+      // Cloisonnement des notifications par utilisateur connecté
+      if (tableName === 'notifications') {
+        let rows: any[];
+        if (currentUser && currentUser.role === 'Admin') {
+          rows = db.prepare('SELECT * FROM notifications').all();
+        } else {
+          rows = db.prepare('SELECT * FROM notifications WHERE userId = ? OR json_extract(data, "$.userId") = ?').all(currentUser?.id || '', currentUser?.id || '');
+        }
+        return res.json(rows.map(r => formatRowResponse(tableName, r, currentUser)));
+      }
+
       if (page !== undefined && limit !== undefined) {
         const pageNum = Math.max(1, parseInt(page as string, 10) || 1);
         const limitNum = Math.min(200, Math.max(1, parseInt(limit as string, 10) || 50));
@@ -383,12 +380,12 @@ const setupCrudRoutes = (tableName: string, extraCols: string[] = [], writeRoles
         const rows = db.prepare(`SELECT * FROM ${tableName} LIMIT ? OFFSET ?`).all(limitNum, offset);
         const total = (db.prepare(`SELECT COUNT(*) as count FROM ${tableName}`).get() as any).count;
         res.json({
-          data: rows.map(r => formatRowResponse(tableName, r)),
+          data: rows.map(r => formatRowResponse(tableName, r, currentUser)),
           pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) }
         });
       } else {
         const rows = db.prepare(`SELECT * FROM ${tableName}`).all();
-        res.json(rows.map(r => formatRowResponse(tableName, r)));
+        res.json(rows.map(r => formatRowResponse(tableName, r, currentUser)));
       }
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -398,18 +395,19 @@ const setupCrudRoutes = (tableName: string, extraCols: string[] = [], writeRoles
   // GET one
   app.get(`/api/${tableName}/:id`, (req: Request, res: Response) => {
     try {
+      const currentUser = (req as any).user;
       const row = db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).get(req.params.id);
       if (!row) return res.status(404).json({ error: 'Not found' });
-      res.json(formatRowResponse(tableName, row));
+      res.json(formatRowResponse(tableName, row, currentUser));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
   // POST
-  app.post(`/api/${tableName}`, ...writeMiddlewares, (req: Request, res: Response) => {
+  const postMiddlewares = writeRoles ? [requireRole(...writeRoles)] : [];
+  app.post(`/api/${tableName}`, ...postMiddlewares, (req: Request, res: Response) => {
     try {
-      // Validate incoming data
       const schema = schemas[tableName as keyof typeof schemas];
       let data = req.body;
       if (schema) {
@@ -421,16 +419,26 @@ const setupCrudRoutes = (tableName: string, extraCols: string[] = [], writeRoles
       }
       if (!data.id) return res.status(400).json({ error: 'id is required' });
       
+      // Hachage du mot de passe s'il s'agit d'une création d'utilisateur
+      if (tableName === 'users' && data.password) {
+        data.password_hash = bcrypt.hashSync(data.password, 10);
+        delete data.password;
+      }
+      
+      const cleanDataToStore = { ...data };
+      delete cleanDataToStore.password_hash;
+      delete cleanDataToStore.passwordHash;
+
       const cols = ['id', ...extraCols, 'data'];
       const vals = [data.id];
       extraCols.forEach(col => vals.push(getSqlColumnValue(col, data)));
-      vals.push(JSON.stringify(data));
+      vals.push(JSON.stringify(cleanDataToStore));
       
       const placeholders = cols.map(() => '?').join(', ');
       
       db.prepare(`INSERT INTO ${tableName} (${cols.join(', ')}) VALUES (${placeholders})`).run(...vals);
       
-      const responsePayload = formatRowResponse(tableName, data);
+      const responsePayload = formatRowResponse(tableName, data, (req as any).user);
       broadcastEvent(`${tableName.toUpperCase()}_CREATED`, responsePayload);
       
       res.status(201).json(responsePayload);
@@ -439,10 +447,17 @@ const setupCrudRoutes = (tableName: string, extraCols: string[] = [], writeRoles
     }
   });
 
-  // PUT
-  app.put(`/api/${tableName}/:id`, ...writeMiddlewares, (req: Request, res: Response) => {
+  // PUT (avec support d'auto-édition profil et d'Upsert)
+  app.put(`/api/${tableName}/:id`, (req: Request, res: Response, next: NextFunction) => {
+    if (tableName === 'users' && (req as any).user?.id === req.params.id) {
+      return next();
+    }
+    if (writeRoles) {
+      return requireRole(...writeRoles)(req, res, next);
+    }
+    next();
+  }, (req: Request, res: Response) => {
     try {
-      // Validate incoming data
       const schema = schemas[tableName as keyof typeof schemas];
       let data = req.body;
       if (schema) {
@@ -452,27 +467,38 @@ const setupCrudRoutes = (tableName: string, extraCols: string[] = [], writeRoles
         }
         data = validation.data;
       }
-      data.id = req.params.id; // ensure ID matching
+      data.id = req.params.id;
       
+      const cleanDataToStore = { ...data };
+      delete cleanDataToStore.password_hash;
+      delete cleanDataToStore.passwordHash;
+
       const setClauses = extraCols.map(col => `${col} = ?`);
       setClauses.push('data = ?');
       
       const vals = [];
       extraCols.forEach(col => vals.push(getSqlColumnValue(col, data)));
-      vals.push(JSON.stringify(data));
+      vals.push(JSON.stringify(cleanDataToStore));
       vals.push(req.params.id);
       
-      // Get old data to check for specific changes (like task completion)
       const oldRow = db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).get(req.params.id);
       const oldData = oldRow ? formatRowResponse(tableName, oldRow) : null;
       
       const result = db.prepare(`UPDATE ${tableName} SET ${setClauses.join(', ')} WHERE id = ?`).run(...vals);
-      if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
       
-      const responsePayload = formatRowResponse(tableName, data);
+      // Support d'Upsert si la ligne n'existait pas encore (ex: settings non initialisés)
+      if (result.changes === 0) {
+        const cols = ['id', ...extraCols, 'data'];
+        const insertVals = [req.params.id];
+        extraCols.forEach(col => insertVals.push(getSqlColumnValue(col, data)));
+        insertVals.push(JSON.stringify(cleanDataToStore));
+        const placeholders = cols.map(() => '?').join(', ');
+        db.prepare(`INSERT INTO ${tableName} (${cols.join(', ')}) VALUES (${placeholders})`).run(...insertVals);
+      }
+      
+      const responsePayload = formatRowResponse(tableName, data, (req as any).user);
       broadcastEvent(`${tableName.toUpperCase()}_UPDATED`, responsePayload);
       
-      // Auto-Notification logic for Tasks
       if (tableName === 'tasks' && oldData && oldData.status !== 'Terminé' && data.status === 'Terminé') {
         const usersRows = db.prepare(`SELECT * FROM users`).all();
         const users = usersRows.map(r => formatRowResponse('users', r));
@@ -481,7 +507,7 @@ const setupCrudRoutes = (tableName: string, extraCols: string[] = [], writeRoles
         const notifId = `n${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         const notification = {
           id: notifId,
-          userId: data.managerId, // Notify the manager
+          userId: data.managerId,
           type: 'TASK_COMPLETED',
           title: 'Objectif Atteint ! ✅',
           message: `${assignee?.name || 'Un collaborateur'} a terminé la tâche : "${data.title}"`,
@@ -501,8 +527,21 @@ const setupCrudRoutes = (tableName: string, extraCols: string[] = [], writeRoles
   });
 
   // DELETE
-  app.delete(`/api/${tableName}/:id`, ...writeMiddlewares, (req: Request, res: Response) => {
+  const deleteMiddlewares = writeRoles ? [requireRole(...writeRoles)] : [];
+  app.delete(`/api/${tableName}/:id`, ...deleteMiddlewares, (req: Request, res: Response) => {
     try {
+      const currentUser = (req as any).user;
+      if (tableName === 'notifications') {
+        const notif = db.prepare('SELECT * FROM notifications WHERE id = ?').get(req.params.id) as any;
+        if (!notif) return res.status(404).json({ error: 'Notification introuvable' });
+        let parsed: any = {};
+        try { parsed = JSON.parse(notif.data); } catch { /* ignore */ }
+        const ownerId = notif.userId || parsed.userId;
+        if (currentUser.role !== 'Admin' && ownerId !== currentUser.id) {
+          return res.status(403).json({ error: 'Accès refusé' });
+        }
+      }
+
       const result = db.prepare(`DELETE FROM ${tableName} WHERE id = ?`).run(req.params.id);
       if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
       
@@ -515,14 +554,14 @@ const setupCrudRoutes = (tableName: string, extraCols: string[] = [], writeRoles
   });
 };
 
-// Bootstrap the routes with RBAC protection and typed SQL columns
+// Bootstrap standard CRUD routes
 setupCrudRoutes('users', ['name', 'email', 'role', 'department', 'site_id', 'password_hash'], ['admin']);
 setupCrudRoutes('sites', ['name', 'type', 'manager_id'], ['admin', 'manager']);
 setupCrudRoutes('tasks', [
   'title', 'description', 'status', 'priority', 'site_id', 'assignee_id', 
   'manager_id', 'department', 'type', 'health_status', 'risk_level', 
   'start_date', 'due_date', 'created_at', 'updated_at'
-], ['admin', 'manager', 'collaborateur']);
+], ['admin', 'manager']);
 setupCrudRoutes('workflow_templates', [], ['admin']);
 setupCrudRoutes('procurement_suppliers', ['name', 'campaign_id'], ['admin', 'manager', 'collaborateur']);
 setupCrudRoutes('global_suppliers', ['name'], ['admin', 'manager']);
@@ -655,9 +694,10 @@ app.post('/api/send_email', emailLimiter, async (req: Request, res: Response) =>
 });
 
 // Endpoint to refresh supplier info using AI
-app.post('/api/refresh_supplier_info', async (req: Request, res: Response) => {
+app.post('/api/refresh_supplier_info', procurementCampaignLimiter, requireRole('admin', 'manager'), async (req: Request, res: Response) => {
   try {
     const { supplierId, name } = req.body;
+    if (!name) return res.status(400).json({ error: 'Nom requis' });
     const newData = await refreshSupplierInfo(name, db);
     
     if (newData) {
@@ -670,18 +710,18 @@ app.post('/api/refresh_supplier_info', async (req: Request, res: Response) => {
       }
     }
     res.status(404).json({ error: 'Failed to refresh info' });
-  } catch (err) {
+  } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // Endpoint to refresh ALL suppliers
-app.post('/api/refresh_all_suppliers', async (req: Request, res: Response) => {
+app.post('/api/refresh_all_suppliers', procurementCampaignLimiter, requireRole('admin', 'manager'), async (req: Request, res: Response) => {
   try {
     const suppliers = db.prepare(`SELECT id, name, data FROM global_suppliers`).all();
     const results = await refreshAllSuppliers(suppliers, db);
     res.json(results);
-  } catch (err) {
+  } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -694,8 +734,11 @@ const distPath = path.join(__dirname, '../dist');
 app.use(express.static(distPath));
 
 // The "catchall" handler: for any request that doesn't
-// match one above, send back React's index.html file.
+// match one above, send back React's index.html file (or 404 for API).
 app.get('*', (req: Request, res: Response) => {
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({ error: 'Endpoint API introuvable' });
+  }
   res.sendFile(path.join(distPath, 'index.html'));
 });
 

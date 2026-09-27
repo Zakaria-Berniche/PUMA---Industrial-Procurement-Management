@@ -15,7 +15,6 @@ const USER_BOB_ID = 'test_sec_bob_002';
 const USER_ADMIN_ID = 'test_sec_admin_003';
 
 let aliceToken: string;
-let bobToken: string;
 let adminToken: string;
 
 beforeAll(() => {
@@ -40,7 +39,6 @@ beforeAll(() => {
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, USER_ADMIN_ID);
 
   aliceToken = jwt.sign({ id: USER_ALICE_ID, email: alice.email, role: alice.role }, JWT_SECRET, { expiresIn: '1h' });
-  bobToken = jwt.sign({ id: USER_BOB_ID, email: bob.email, role: bob.role }, JWT_SECRET, { expiresIn: '1h' });
   adminToken = jwt.sign({ id: USER_ADMIN_ID, email: admin.email, role: admin.role }, JWT_SECRET, { expiresIn: '1h' });
 });
 

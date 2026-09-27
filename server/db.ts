@@ -107,55 +107,116 @@ const migrateSchemaAndData = () => {
   // Ajouter colonnes si manquantes dans les bases existantes
   const userCols = (db.pragma('table_info(users)') as any[]).map(c => c.name);
   if (!userCols.includes('password_hash')) {
-    try { db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT;'); } catch (_) {}
+    try { db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT;'); } catch { /* ignore */ }
   }
   if (!userCols.includes('site_id')) {
-    try { db.exec('ALTER TABLE users ADD COLUMN site_id TEXT;'); } catch (_) {}
+    try { db.exec('ALTER TABLE users ADD COLUMN site_id TEXT;'); } catch { /* ignore */ }
   }
   if (!userCols.includes('created_at')) {
-    try { db.exec('ALTER TABLE users ADD COLUMN created_at TEXT;'); } catch (_) {}
+    try { db.exec('ALTER TABLE users ADD COLUMN created_at TEXT;'); } catch { /* ignore */ }
   }
 
   const siteCols = (db.pragma('table_info(sites)') as any[]).map(c => c.name);
   if (!siteCols.includes('manager_id')) {
-    try { db.exec('ALTER TABLE sites ADD COLUMN manager_id TEXT;'); } catch (_) {}
+    try { db.exec('ALTER TABLE sites ADD COLUMN manager_id TEXT;'); } catch { /* ignore */ }
   }
 
   const taskCols = (db.pragma('table_info(tasks)') as any[]).map(c => c.name);
-  if (!taskCols.includes('site_id')) {
-    try { db.exec('ALTER TABLE tasks ADD COLUMN site_id TEXT;'); } catch (_) {}
-  }
-  if (!taskCols.includes('assignee_id')) {
-    try { db.exec('ALTER TABLE tasks ADD COLUMN assignee_id TEXT;'); } catch (_) {}
-  }
-  if (!taskCols.includes('manager_id')) {
-    try { db.exec('ALTER TABLE tasks ADD COLUMN manager_id TEXT;'); } catch (_) {}
-  }
-  if (!taskCols.includes('description')) {
-    try { db.exec('ALTER TABLE tasks ADD COLUMN description TEXT;'); } catch (_) {}
-  }
-  if (!taskCols.includes('health_status')) {
-    try { db.exec('ALTER TABLE tasks ADD COLUMN health_status TEXT;'); } catch (_) {}
-  }
-  if (!taskCols.includes('risk_level')) {
-    try { db.exec('ALTER TABLE tasks ADD COLUMN risk_level TEXT;'); } catch (_) {}
-  }
-  if (!taskCols.includes('start_date')) {
-    try { db.exec('ALTER TABLE tasks ADD COLUMN start_date TEXT;'); } catch (_) {}
-  }
-  if (!taskCols.includes('due_date')) {
-    try { db.exec('ALTER TABLE tasks ADD COLUMN due_date TEXT;'); } catch (_) {}
-  }
-  if (!taskCols.includes('created_at')) {
-    try { db.exec('ALTER TABLE tasks ADD COLUMN created_at TEXT;'); } catch (_) {}
-  }
-  if (!taskCols.includes('updated_at')) {
-    try { db.exec('ALTER TABLE tasks ADD COLUMN updated_at TEXT;'); } catch (_) {}
+  if (taskCols.includes('siteId') || taskCols.includes('assigneeId')) {
+    try {
+      db.exec(`
+        DROP TABLE IF EXISTS tasks_new;
+        CREATE TABLE tasks_new (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          description TEXT,
+          status TEXT NOT NULL,
+          priority TEXT,
+          site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+          assignee_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+          manager_id TEXT,
+          department TEXT,
+          type TEXT,
+          health_status TEXT,
+          risk_level TEXT,
+          start_date TEXT,
+          due_date TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          data TEXT NOT NULL
+        );
+      `);
+      const oldRows = db.prepare('SELECT * FROM tasks').all() as any[];
+      const insertNew = db.prepare(`
+        INSERT INTO tasks_new (
+          id, title, description, status, priority, site_id, assignee_id, manager_id,
+          department, type, health_status, risk_level, start_date, due_date, created_at, updated_at, data
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const r of oldRows) {
+        let d: any = {};
+        try { d = JSON.parse(r.data || '{}'); } catch { /* ignore */ }
+        insertNew.run(
+          r.id,
+          r.title || d.title || 'Sans titre',
+          r.description || d.description || '',
+          r.status || d.status || 'Nouveau',
+          r.priority || d.priority || 'Normale',
+          r.site_id || r.siteId || d.siteId || d.site_id || 'site_sba',
+          r.assignee_id || r.assigneeId || d.assigneeId || d.assignee_id || null,
+          r.manager_id || d.managerId || d.manager_id || null,
+          r.department || d.department || '',
+          r.type || d.type || '',
+          r.health_status || d.healthStatus || d.health_status || '',
+          r.risk_level || d.riskLevel || d.risk_level || '',
+          r.start_date || d.startDate || d.start_date || '',
+          r.due_date || d.dueDate || d.due_date || '',
+          r.created_at || d.createdAt || d.created_at || '',
+          r.updated_at || d.updatedAt || d.updated_at || '',
+          r.data || JSON.stringify(d)
+        );
+      }
+      db.exec('DROP TABLE tasks;');
+      db.exec('ALTER TABLE tasks_new RENAME TO tasks;');
+    } catch (e) {
+      console.error('Migration rebuild tasks error:', e);
+    }
+  } else {
+    if (!taskCols.includes('site_id')) {
+      try { db.exec('ALTER TABLE tasks ADD COLUMN site_id TEXT;'); } catch { /* ignore */ }
+    }
+    if (!taskCols.includes('assignee_id')) {
+      try { db.exec('ALTER TABLE tasks ADD COLUMN assignee_id TEXT;'); } catch { /* ignore */ }
+    }
+    if (!taskCols.includes('manager_id')) {
+      try { db.exec('ALTER TABLE tasks ADD COLUMN manager_id TEXT;'); } catch { /* ignore */ }
+    }
+    if (!taskCols.includes('description')) {
+      try { db.exec('ALTER TABLE tasks ADD COLUMN description TEXT;'); } catch { /* ignore */ }
+    }
+    if (!taskCols.includes('health_status')) {
+      try { db.exec('ALTER TABLE tasks ADD COLUMN health_status TEXT;'); } catch { /* ignore */ }
+    }
+    if (!taskCols.includes('risk_level')) {
+      try { db.exec('ALTER TABLE tasks ADD COLUMN risk_level TEXT;'); } catch { /* ignore */ }
+    }
+    if (!taskCols.includes('start_date')) {
+      try { db.exec('ALTER TABLE tasks ADD COLUMN start_date TEXT;'); } catch { /* ignore */ }
+    }
+    if (!taskCols.includes('due_date')) {
+      try { db.exec('ALTER TABLE tasks ADD COLUMN due_date TEXT;'); } catch { /* ignore */ }
+    }
+    if (!taskCols.includes('created_at')) {
+      try { db.exec('ALTER TABLE tasks ADD COLUMN created_at TEXT;'); } catch { /* ignore */ }
+    }
+    if (!taskCols.includes('updated_at')) {
+      try { db.exec('ALTER TABLE tasks ADD COLUMN updated_at TEXT;'); } catch { /* ignore */ }
+    }
   }
 
   const procCols = (db.pragma('table_info(procurement_suppliers)') as any[]).map(c => c.name);
   if (!procCols.includes('campaign_id')) {
-    try { db.exec('ALTER TABLE procurement_suppliers ADD COLUMN campaign_id TEXT;'); } catch (_) {}
+    try { db.exec('ALTER TABLE procurement_suppliers ADD COLUMN campaign_id TEXT;'); } catch { /* ignore */ }
   }
 
   // Peupler les colonnes typées depuis data JSON si besoin
@@ -442,35 +503,35 @@ const seedDefaults = () => {
     });
   }
 
-  const settingsCount = db.prepare('SELECT count(*) as count FROM settings').get().count;
-  if (settingsCount === 0) {
-    db.prepare('INSERT INTO settings (id, data) VALUES (?, ?)').run('company_info', JSON.stringify({
-      name: 'PUMA',
-      sector: 'Plateforme de gestion des tâches et tickets pour les services Achat et COMEX.',
-      logo: '/logo.png'
-    }));
+  const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (id, data) VALUES (?, ?)');
+  
+  insertSetting.run('company_info', JSON.stringify({
+    name: 'PUMA',
+    sector: 'Plateforme de gestion des tâches et tickets pour les services Achat et COMEX.',
+    logo: '/logo.png'
+  }));
 
-    db.prepare('INSERT INTO settings (id, data) VALUES (?, ?)').run('global_rules', JSON.stringify({
-      id: 'global_rules',
-      validationThresholdDZD: 500000,
-      slaMatrix: {
-        Analyse: 24,
-        Consultation: 48,
-        Validation: 24,
-        Négociation: 24,
-        Administratif: 24,
-        Logistique: 168,
-        Contrôle: 24,
-        Autre: 24
-      },
-      urgentModeSlaHours: 4
-    }));
+  insertSetting.run('global_rules', JSON.stringify({
+    id: 'global_rules',
+    validationThresholdDZD: 500000,
+    slaMatrix: {
+      Analyse: 24,
+      Consultation: 48,
+      Validation: 24,
+      Négociation: 24,
+      Administratif: 24,
+      Logistique: 168,
+      Contrôle: 24,
+      Autre: 24
+    },
+    urgentModeSlaHours: 4
+  }));
 
-    db.prepare('INSERT INTO settings (id, data) VALUES (?, ?)').run('ai_config', JSON.stringify({
-      id: 'ai_config',
-      model: 'gemini-2.5-flash',
-      temperature: 0.1, 
-      sourcingPromptTemplate: `Tu es un agent IA expert en "Procurement & Sourcing B2B" de niveau Senior.
+  insertSetting.run('ai_config', JSON.stringify({
+    id: 'ai_config',
+    model: 'gemini-2.5-flash',
+    temperature: 0.1, 
+    sourcingPromptTemplate: `Tu es un agent IA expert en "Procurement & Sourcing B2B" de niveau Senior.
 Ta mission est de réaliser un sourcing de haute précision pour la demande suivante :
 - Catégorie : {{category}}
 - Marque : {{brand}}
@@ -502,7 +563,7 @@ RETOURNE UNIQUEMENT UN TABLEAU JSON VALIDE (format strict) :
     "weaknesses": []
   }
 ]`,
-      refreshPromptTemplate: `Fais une recherche web sur l'entreprise "{{name}}" et retourne ses informations de contact à jour au format JSON :
+    refreshPromptTemplate: `Fais une recherche web sur l'entreprise "{{name}}" et retourne ses informations de contact à jour au format JSON :
 {
   "phone": "numéro de téléphone",
   "website": "url du site",
@@ -513,18 +574,17 @@ RETOURNE UNIQUEMENT UN TABLEAU JSON VALIDE (format strict) :
   "location": { "lat": 0, "lng": 0 }
 }
 RETOURNE UNIQUEMENT LE JSON.`
-    }));
+  }));
 
-    db.prepare('INSERT INTO settings (id, data) VALUES (?, ?)').run('report_config', JSON.stringify({
-      id: 'report_config',
-      primaryColor: '#E10600', 
-      secondaryColor: '#000000',
-      fontFamily: 'helvetica',
-      showHeader: true,
-      showFooter: true,
-      footerText: 'PUMA - Plateforme de Pilotage Industriel - Document Confidentiel'
-    }));
-  }
+  insertSetting.run('report_config', JSON.stringify({
+    id: 'report_config',
+    primaryColor: '#E10600', 
+    secondaryColor: '#000000',
+    fontFamily: 'helvetica',
+    showHeader: true,
+    showFooter: true,
+    footerText: 'PUMA - Plateforme de Pilotage Industriel - Document Confidentiel'
+  }));
 
   // Amorçage des utilisateurs et sites si la table users est vide (ex: déploiement neuf Docker)
   const userCount = (db.prepare('SELECT count(*) as count FROM users').get() as any).count;
