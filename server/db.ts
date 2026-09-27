@@ -507,7 +507,7 @@ const seedDefaults = () => {
   
   insertSetting.run('company_info', JSON.stringify({
     name: 'PUMA',
-    sector: 'Plateforme de gestion des tâches et tickets pour les services Achat et COMEX.',
+    sector: 'Plateforme de gestion des achats et approvisionnements industriels pour les services Achat et COMEX.',
     logo: '/logo.png'
   }));
 
